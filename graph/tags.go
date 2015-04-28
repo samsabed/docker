@@ -1,6 +1,7 @@
 package graph
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,6 +32,12 @@ var (
 	validDigest  = regexp.MustCompile(`[a-zA-Z0-9-_+.]+:[a-fA-F0-9]+`)
 )
 
+type ProgressStatus struct {
+	c         chan struct{}
+	observers []io.Writer
+	history   bytes.Buffer
+}
+
 type TagStore struct {
 	path         string
 	graph        *Graph
@@ -39,8 +46,8 @@ type TagStore struct {
 	sync.Mutex
 	// FIXME: move push/pull-related fields
 	// to a helper type
-	pullingPool     map[string]chan struct{}
-	pushingPool     map[string]chan struct{}
+	pullingPool     map[string]*ProgressStatus
+	pushingPool     map[string]*ProgressStatus
 	registryService *registry.Service
 	eventsService   *events.Events
 	trustService    *trust.TrustStore
@@ -85,8 +92,8 @@ func NewTagStore(path string, cfg *TagStoreConfig) (*TagStore, error) {
 		graph:           cfg.Graph,
 		trustKey:        cfg.Key,
 		Repositories:    make(map[string]Repository),
-		pullingPool:     make(map[string]chan struct{}),
-		pushingPool:     make(map[string]chan struct{}),
+		pullingPool:     make(map[string]*ProgressStatus),
+		pushingPool:     make(map[string]*ProgressStatus),
 		registryService: cfg.Registry,
 		eventsService:   cfg.Events,
 		trustService:    cfg.Trust,
@@ -402,27 +409,27 @@ func validateDigest(dgst string) error {
 	return nil
 }
 
-func (store *TagStore) poolAdd(kind, key string) (chan struct{}, error) {
+func (store *TagStore) poolAdd(kind, key string) (*ProgressStatus, error) {
 	store.Lock()
 	defer store.Unlock()
 
-	if c, exists := store.pullingPool[key]; exists {
-		return c, fmt.Errorf("pull %s is already in progress", key)
+	if p, exists := store.pullingPool[key]; exists {
+		return p, fmt.Errorf("pull %s is already in progress", key)
 	}
-	if c, exists := store.pushingPool[key]; exists {
-		return c, fmt.Errorf("push %s is already in progress", key)
+	if p, exists := store.pushingPool[key]; exists {
+		return p, fmt.Errorf("push %s is already in progress", key)
 	}
 
-	c := make(chan struct{})
+	ps := NewProgressStatus()
 	switch kind {
 	case "pull":
-		store.pullingPool[key] = c
+		store.pullingPool[key] = ps
 	case "push":
-		store.pushingPool[key] = c
+		store.pushingPool[key] = ps
 	default:
 		return nil, fmt.Errorf("Unknown pool type")
 	}
-	return c, nil
+	return ps, nil
 }
 
 func (store *TagStore) poolRemove(kind, key string) error {
@@ -430,17 +437,45 @@ func (store *TagStore) poolRemove(kind, key string) error {
 	defer store.Unlock()
 	switch kind {
 	case "pull":
-		if c, exists := store.pullingPool[key]; exists {
-			close(c)
+		if ps, exists := store.pullingPool[key]; exists {
+			close(ps.c)
 			delete(store.pullingPool, key)
 		}
 	case "push":
-		if c, exists := store.pushingPool[key]; exists {
-			close(c)
+		if ps, exists := store.pushingPool[key]; exists {
+			close(ps.c)
 			delete(store.pushingPool, key)
 		}
 	default:
 		return fmt.Errorf("Unknown pool type")
 	}
 	return nil
+}
+
+func NewProgressStatus() *ProgressStatus {
+	return &ProgressStatus{
+		c:         make(chan struct{}),
+		observers: []io.Writer{},
+	}
+}
+
+func (ps *ProgressStatus) Write(p []byte) (n int, err error) {
+	ps.history.Write(p)
+	for _, w := range ps.observers {
+		// copy paste from MultiWriter, replaced return with continue
+		n, err = w.Write(p)
+		if err != nil {
+			continue
+		}
+		if n != len(p) {
+			err = io.ErrShortWrite
+			continue
+		}
+	}
+	return len(p), nil
+}
+
+func (ps *ProgressStatus) AddObserver(w io.Writer) {
+	w.Write(ps.history.Bytes())
+	ps.observers = append(ps.observers, w)
 }

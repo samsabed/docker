@@ -44,17 +44,20 @@ func (s *TagStore) Pull(image string, tag string, imagePullConfig *ImagePullConf
 		return err
 	}
 
-	c, err := s.poolAdd("pull", utils.ImageReference(repoInfo.LocalName, tag))
+	ps, err := s.poolAdd("pull", utils.ImageReference(repoInfo.LocalName, tag))
 	if err != nil {
-		if c != nil {
+		if ps.c != nil {
 			// Another pull of the same repository is already taking place; just wait for it to finish
 			imagePullConfig.OutStream.Write(sf.FormatStatus("", "Repository %s already being pulled by another client. Waiting.", repoInfo.LocalName))
-			<-c
+			ps.AddObserver(imagePullConfig.OutStream)
+			<-ps.c
+			imagePullConfig.OutStream.Write(sf.FormatStatus("", "Repository %s Downloaded.", repoInfo.LocalName))
 			return nil
 		}
 		return err
 	}
 	defer s.poolRemove("pull", utils.ImageReference(repoInfo.LocalName, tag))
+	ps.AddObserver(imagePullConfig.OutStream)
 
 	logrus.Debugf("pulling image from host %q with remote name %q", repoInfo.Index.Name, repoInfo.RemoteName)
 	endpoint, err := repoInfo.GetEndpoint()
@@ -78,7 +81,7 @@ func (s *TagStore) Pull(image string, tag string, imagePullConfig *ImagePullConf
 		}
 
 		logrus.Debugf("pulling v2 repository with local name %q", repoInfo.LocalName)
-		if err := s.pullV2Repository(r, imagePullConfig.OutStream, repoInfo, tag, sf, imagePullConfig.Parallel); err == nil {
+		if err := s.pullV2Repository(r, ps, repoInfo, tag, sf, imagePullConfig.Parallel); err == nil {
 			s.eventsService.Log("pull", logName, "")
 			return nil
 		} else if err != registry.ErrDoesNotExist && err != ErrV2RegistryUnavailable {
@@ -89,7 +92,7 @@ func (s *TagStore) Pull(image string, tag string, imagePullConfig *ImagePullConf
 	}
 
 	logrus.Debugf("pulling v1 repository with local name %q", repoInfo.LocalName)
-	if err = s.pullRepository(r, imagePullConfig.OutStream, repoInfo, tag, sf, imagePullConfig.Parallel); err != nil {
+	if err = s.pullRepository(r, ps, repoInfo, tag, sf, imagePullConfig.Parallel); err != nil {
 		return err
 	}
 
@@ -161,10 +164,10 @@ func (s *TagStore) pullRepository(r *registry.Session, out io.Writer, repoInfo *
 			}
 
 			// ensure no two downloads of the same image happen at the same time
-			if c, err := s.poolAdd("pull", "img:"+img.ID); err != nil {
-				if c != nil {
+			if ps, err := s.poolAdd("pull", "img:"+img.ID); err != nil {
+				if ps != nil {
 					out.Write(sf.FormatProgress(stringid.TruncateID(img.ID), "Layer already being pulled by another client. Waiting.", nil))
-					<-c
+					<-ps.c
 					out.Write(sf.FormatProgress(stringid.TruncateID(img.ID), "Download complete", nil))
 				} else {
 					logrus.Debugf("Image (id: %s) pull is already running, skipping: %v", img.ID, err)
@@ -270,9 +273,9 @@ func (s *TagStore) pullImage(r *registry.Session, out io.Writer, imgID, endpoint
 		id := history[i]
 
 		// ensure no two downloads of the same layer happen at the same time
-		if c, err := s.poolAdd("pull", "layer:"+id); err != nil {
+		if ps, err := s.poolAdd("pull", "layer:"+id); err != nil {
 			logrus.Debugf("Image (id: %s) pull is already running, skipping: %v", id, err)
-			<-c
+			<-ps.c
 		}
 		defer s.poolRemove("pull", "layer:"+id)
 
@@ -474,10 +477,10 @@ func (s *TagStore) pullV2Tag(r *registry.Session, out io.Writer, endpoint *regis
 		downloadFunc := func(di *downloadInfo) error {
 			logrus.Debugf("pulling blob %q to V1 img %s", sumStr, img.ID)
 
-			if c, err := s.poolAdd("pull", "img:"+img.ID); err != nil {
-				if c != nil {
+			if ps, err := s.poolAdd("pull", "img:"+img.ID); err != nil {
+				if ps.c != nil {
 					out.Write(sf.FormatProgress(stringid.TruncateID(img.ID), "Layer already being pulled by another client. Waiting.", nil))
-					<-c
+					<-ps.c
 					out.Write(sf.FormatProgress(stringid.TruncateID(img.ID), "Download complete", nil))
 				} else {
 					logrus.Debugf("Image (id: %s) pull is already running, skipping: %v", img.ID, err)

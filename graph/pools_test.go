@@ -12,8 +12,8 @@ func init() {
 
 func TestPools(t *testing.T) {
 	s := &TagStore{
-		pullingPool: make(map[string]chan struct{}),
-		pushingPool: make(map[string]chan struct{}),
+		pullingPool: make(map[string]*ProgressStatus),
+		pushingPool: make(map[string]*ProgressStatus),
 	}
 
 	if _, err := s.poolAdd("pull", "test1"); err != nil {
