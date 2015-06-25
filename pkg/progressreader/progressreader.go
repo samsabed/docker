@@ -7,6 +7,11 @@ import (
 	"github.com/docker/docker/pkg/streamformatter"
 )
 
+type ProgressMsg struct {
+	Current int
+	Total   int
+}
+
 // Reader with progress bar
 type Config struct {
 	In         io.ReadCloser // Stream to read from
@@ -18,6 +23,7 @@ type Config struct {
 	NewLines   bool
 	ID         string
 	Action     string
+	Publisher  *pubsub.Publisher
 }
 
 func New(newReader Config) *Config {
@@ -54,6 +60,9 @@ func (config *Config) Close() error {
 		config.Current = config.Size
 		updateProgress(config)
 	}
+	if config.Publisher != nil {
+		config.Publisher.Close()
+	}
 	return config.In.Close()
 }
 
@@ -61,4 +70,8 @@ func updateProgress(config *Config) {
 	progress := jsonmessage.JSONProgress{Current: config.Current, Total: config.Size}
 	fmtMessage := config.Formatter.FormatProgress(config.ID, config.Action, &progress)
 	config.Out.Write(fmtMessage)
+
+	if config.Publisher != nil {
+		config.Publisher.Publish(ProgressMsg{Current: config.Current, Total: config.Size})
+	}
 }

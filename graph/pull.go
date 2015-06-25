@@ -43,15 +43,13 @@ func (s *TagStore) Pull(image string, tag string, imagePullConfig *ImagePullConf
 		return err
 	}
 
-	c, err := s.poolAdd("pull", utils.ImageReference(repoInfo.LocalName, tag))
+	e, err := s.poolAdd("pull", utils.ImageReference(repoInfo.LocalName, tag))
 	if err != nil {
-		if c != nil {
-			// Another pull of the same repository is already taking place; just wait for it to finish
-			imagePullConfig.OutStream.Write(sf.FormatStatus("", "Repository %s already being pulled by another client. Waiting.", repoInfo.LocalName))
-			<-c
-			return nil
-		}
-		return err
+		// Another pull of the same repository is already taking place; just wait for it to finish
+		imagePullConfig.OutStream.Write(sf.FormatStatus("", "Repository %s already being %sed by another client. Waiting.", e.kind, repoInfo.LocalName))
+		ch := e.progress.Subscribe()
+		displayProgress(imagePullConfig.OutStream, sf, ch, stringid.TruncateID(img.ID))
+		return nil
 	}
 	defer s.poolRemove("pull", utils.ImageReference(repoInfo.LocalName, tag))
 
@@ -735,4 +733,17 @@ func (s *TagStore) pullV2Tag(r *registry.Session, out io.Writer, endpoint *regis
 	}
 
 	return tagUpdated, nil
+}
+
+func displayProgress(out io.Writer, sf *StreamFormatter, ch chan interface{}, string id) {
+	for {
+		val, ok := <-ch
+		if !ok {
+			break
+		}
+		msg := v.(progressreader.progressMsg)
+		progress := jsonmessage.JSONProgress{Current: v.Current, Total: v.Total}
+		fmtMessage := config.Formatter.FormatProgress(id, "downloading", &progress)
+		config.Out.Write(fmtMessage)
+	}
 }

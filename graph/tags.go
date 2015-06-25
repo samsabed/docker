@@ -12,11 +12,13 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/docker/docker/daemon/events"
 	"github.com/docker/docker/graph/tags"
 	"github.com/docker/docker/image"
 	"github.com/docker/docker/pkg/parsers"
+	"github.com/docker/docker/pkg/pubsub"
 	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/docker/registry"
 	"github.com/docker/docker/trust"
@@ -31,6 +33,11 @@ var (
 	validDigest = regexp.MustCompile(`[a-zA-Z0-9-_+.]+:[a-fA-F0-9]+`)
 )
 
+type PoolEntry struct {
+	progress *pubsub.Publisher
+	kind     string
+}
+
 type TagStore struct {
 	path         string
 	graph        *Graph
@@ -39,8 +46,7 @@ type TagStore struct {
 	sync.Mutex
 	// FIXME: move push/pull-related fields
 	// to a helper type
-	pullingPool     map[string]chan struct{}
-	pushingPool     map[string]chan struct{}
+	pool            map[string]poolEntry
 	registryService *registry.Service
 	eventsService   *events.Events
 	trustService    *trust.TrustStore
@@ -85,8 +91,7 @@ func NewTagStore(path string, cfg *TagStoreConfig) (*TagStore, error) {
 		graph:           cfg.Graph,
 		trustKey:        cfg.Key,
 		Repositories:    make(map[string]Repository),
-		pullingPool:     make(map[string]chan struct{}),
-		pushingPool:     make(map[string]chan struct{}),
+		pool:            make(map[string]PoolEntry),
 		registryService: cfg.Registry,
 		eventsService:   cfg.Events,
 		trustService:    cfg.Trust,
@@ -394,45 +399,26 @@ func validateDigest(dgst string) error {
 	return nil
 }
 
-func (store *TagStore) poolAdd(kind, key string) (chan struct{}, error) {
+func (store *TagStore) poolAdd(kind, key string) (PoolEntry, error) {
 	store.Lock()
 	defer store.Unlock()
 
-	if c, exists := store.pullingPool[key]; exists {
+	if c, exists := store.pool[key]; exists {
 		return c, fmt.Errorf("pull %s is already in progress", key)
 	}
-	if c, exists := store.pushingPool[key]; exists {
-		return c, fmt.Errorf("push %s is already in progress", key)
-	}
 
-	c := make(chan struct{})
-	switch kind {
-	case "pull":
-		store.pullingPool[key] = c
-	case "push":
-		store.pushingPool[key] = c
-	default:
-		return nil, fmt.Errorf("Unknown pool type")
-	}
+	e := PoolEntry{progress: pubsub.NewPublisher(time.Millisecond*100, 2), kind: kind}
+	store.Pool[key] = e
 	return c, nil
 }
 
 func (store *TagStore) poolRemove(kind, key string) error {
 	store.Lock()
 	defer store.Unlock()
-	switch kind {
-	case "pull":
-		if c, exists := store.pullingPool[key]; exists {
-			close(c)
-			delete(store.pullingPool, key)
-		}
-	case "push":
-		if c, exists := store.pushingPool[key]; exists {
-			close(c)
-			delete(store.pushingPool, key)
-		}
-	default:
-		return fmt.Errorf("Unknown pool type")
+	e, exists := store.pool[key]
+	if exists && e.kind == kind {
+		close(c)
+		delete(store.pool, key)
 	}
 	return nil
 }
